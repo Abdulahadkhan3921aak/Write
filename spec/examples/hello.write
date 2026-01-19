@@ -1,0 +1,5 @@
+# Hello example
+
+print "Hello from Write"
+set name to "World"
+print name

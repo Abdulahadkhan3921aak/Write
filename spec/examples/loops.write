@@ -1,0 +1,16 @@
+# Loops and conditionals demo
+
+set x to 0
+set y to 3
+
+for i from 1 to 3 do
+    set x to add x and i
+    if x is greater than y then
+        print "x passed y"
+    end if
+end for
+
+while x is greater than 0 do
+    print x
+    set x to subtract x and 1
+end while

@@ -1,0 +1,14 @@
+# Logic demo
+
+set a to 1
+set b to 0
+
+if !(a == 0 | b == 0) then
+    print "none is zero"
+end if
+
+if a > 0 and b > 0 then
+    print "both positive"
+else
+    print "not both positive"
+end if

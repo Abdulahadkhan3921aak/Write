@@ -1,0 +1,13 @@
+# Factorial in Write
+
+set n to 5
+set result to 1
+set i to 1
+
+while i is less than or equal to n do
+    set result to multiply result and i
+    set i to add i and 1
+end while
+
+print "factorial ="
+print result
