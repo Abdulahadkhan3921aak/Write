@@ -1,0 +1,11 @@
+function "add" arguments: (a:int, b:int)
+    set result to add a and b
+    print "sum is " result
+end_function
+
+function "greet" arguments: (name:string = "world")
+    print "hello " name
+end_function
+
+call "add" with arguments:(5, 4)
+call "greet" with arguments:("write")

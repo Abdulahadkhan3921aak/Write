@@ -20,6 +20,9 @@ class TokenKind(Enum):
     LPAREN = auto()
     RPAREN = auto()
     COMMA = auto()
+    COLON = auto()
+    LBRACKET = auto()
+    RBRACKET = auto()
     BANG = auto()
     AMP = auto()
     PIPE = auto()
@@ -68,6 +71,7 @@ KEYWORDS = {
     # arithmetic words can be treated as keywords if desired
     "add",
     "subtract",
+    "sub",
     "multiply",
     "divide",
     "power",
@@ -75,6 +79,21 @@ KEYWORDS = {
     "float",
     "string",
     "bool",
+    "list",
+    "array",
+    "return",
+    "of",
+    "size",
+    # functions
+    "function",
+    "func",
+    "end_function",
+    "end_func",
+    "arguments",
+    "arg",
+    "args",
+    "with",
+    "call",
 }
 
 
@@ -185,8 +204,17 @@ class Lexer:
             if c == ")":
                 self._add(TokenKind.RPAREN)
                 continue
+            if c == "[":
+                self._add(TokenKind.LBRACKET)
+                continue
+            if c == "]":
+                self._add(TokenKind.RBRACKET)
+                continue
             if c == ",":
                 self._add(TokenKind.COMMA)
+                continue
+            if c == ":":
+                self._add(TokenKind.COLON)
                 continue
 
             raise LexerError(f"Unhandled character '{c}' at {self.line}:{self.col}")

@@ -24,19 +24,46 @@ Associativity: binary operators are left-associative except power (right-associa
 
 ## Grammar (EBNF, LL-structured)
 
-# Top-level
+## Top-level
 
 program        ::= stmt_list EOF
+stmt_list      ::= (function_def | stmt) stmt_list | ε
 
-stmt_list      ::= stmt stmt_list | ε
+function_def   ::= ("function" | "func") func_name ("arguments")? ":"? "(" param_list? ")" stmt_list function_end
+function_end   ::= "end_function" | "end_func" | "end" ("function" | "func")
+func_name      ::= STRING | IDENT
+
+param_list     ::= param ("," param)*
+param          ::= IDENT (":" type)? ("=" expr)?
 
 stmt           ::= assignment
     | print_stmt
     | if_stmt
     | while_stmt
     | for_stmt
+    | call_stmt
+    | return_stmt
+    | add_stmt
+    | sub_stmt
+    | declaration
 
-assignment     ::= "set" IDENT "to" expr
+call_stmt      ::= "call" func_name "with" "arguments" ":"? "(" arg_list? ")"
+arg_list       ::= arg ("," arg)*
+arg            ::= IDENT "=" expr | expr
+
+return_stmt    ::= "return" return_values?
+return_values  ::= expr ("," expr)*
+
+assignment     ::= "set" IDENT (":" type)? "to" (expr | add_phrase | sub_phrase)
+declaration    ::= "make" IDENT ("as" type)?
+
+add_stmt       ::= add_phrase
+sub_stmt       ::= sub_phrase
+
+add_phrase     ::= "add" expr "to" IDENT
+sub_phrase     ::= ("sub" | "subtract") expr "from" IDENT
+
+type           ::= "int" | "float" | "string" | "bool" | "list" | "array"
 
 print_stmt     ::= "print" (STRING | expr)
 
@@ -50,7 +77,7 @@ while_stmt     ::= "while" cond "do" stmt_list "end" "while"
 
 for_stmt       ::= "for" IDENT "from" expr "to" expr "do" stmt_list "end" "for"
 
-# Conditions factored for LL (no left recursion)
+## Conditions factored for LL (no left recursion)
 
 cond           ::= cond_or
 
@@ -70,14 +97,14 @@ comp_op        ::= "==" | "!=" | ">" | "<" | ">=" | "<="
     | "is" "greater" "or" "equal" "to"
     | "is" "less" "or" "equal" "to"
 
-# Expressions factored for precedence
+## Expressions factored for precedence
 
 expr           ::= add_expr
 
 add_expr       ::= mul_expr (("+" | "-" | "add" | "subtract") mul_expr)*
 mul_expr       ::= power_expr (("*" | "/" | "multiply" | "divide") power_expr)*
 
-# Right-associative power
+## Right-associative power
 
 power_expr     ::= unary_expr ("power" unary_expr "and" power_expr)?
 

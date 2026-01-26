@@ -53,7 +53,12 @@ class Power(Expr):
     exponent: Expr
 
 
-# Statements
+@dataclass
+class Index(Expr):
+    name: str
+    index: Expr
+
+
 @dataclass
 class Stmt(Node):
     pass
@@ -61,6 +66,7 @@ class Stmt(Node):
 
 @dataclass
 class Program(Node):
+    functions: List["Function"]
     statements: List[Stmt]
 
 
@@ -68,22 +74,37 @@ class Program(Node):
 class Assign(Stmt):
     name: str
     expr: Expr
+    type: Optional[str] = None
+
+
+@dataclass
+class IndexAssign(Stmt):
+    name: str
+    index: Expr
+    expr: Expr
 
 
 @dataclass
 class Declaration(Stmt):
     name: str
-    type: str
+    type: Optional[str] = None
+    size: Optional[Expr] = None
 
 
 @dataclass
 class Input(Stmt):
     name: str
     type: Optional[str] = None
+    prompt: Optional[str] = None
 
 
 @dataclass
 class Print(Stmt):
+    values: List[Expr]
+
+
+@dataclass
+class Return(Stmt):
     values: List[Expr]
 
 
@@ -114,6 +135,33 @@ class For(Stmt):
     body: List[Stmt]
 
 
+# Functions
+@dataclass
+class Param(Node):
+    name: str
+    type: Optional[str] = None
+    default: Optional[Expr] = None
+
+
+@dataclass
+class Arg(Node):
+    name: Optional[str]
+    value: Expr
+
+
+@dataclass
+class Call(Stmt):
+    name: str
+    args: List[Arg]
+
+
+@dataclass
+class Function(Node):
+    name: str
+    params: List[Param]
+    body: List[Stmt]
+
+
 __all__ = [
     "Expr",
     "Stmt",
@@ -124,7 +172,9 @@ __all__ = [
     "Unary",
     "Binary",
     "Power",
+    "Index",
     "Assign",
+    "IndexAssign",
     "Print",
     "Declaration",
     "Input",
@@ -132,4 +182,9 @@ __all__ = [
     "IfBranch",
     "While",
     "For",
+    "Param",
+    "Arg",
+    "Call",
+    "Function",
+    "Return",
 ]

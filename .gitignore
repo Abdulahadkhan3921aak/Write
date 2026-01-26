@@ -1,17 +1,23 @@
 
 # Ignore Python cache files
-__pychache__/
+__pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
 
 # Ignore virtual environment folders
 write/
+.venv/
 
-
-# ignore IDE specific files
+# Ignore IDE specific files
 .vscode/
 
-# ignore dev test files
+# Ignore local artifacts and scratch outputs
 out.cpp
 Project.docx
+tmp_gui_input.write
+tmp_gui_output.cpp
+tmp_gui_output.exe
 /tmp*
+
+*.exe

@@ -13,7 +13,7 @@ Checks:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from . import ast
 
@@ -24,20 +24,42 @@ class SemanticError(Exception):
 
 @dataclass
 class TypeInfo:
-    name: str  # "int" | "float" | "string"
+    name: Optional[
+        str
+    ]  # "int" | "float" | "string" | "bool" | "auto" | container types
+    size: Optional[int] = None  # for containers with known literal size
+
+
+@dataclass
+class ParamInfo:
+    name: str
+    type: Optional[str]
+    has_default: bool
+
+
+@dataclass
+class FunctionSig:
+    name: str
+    params: List[ParamInfo]
 
 
 Numeric = {"int", "float"}
 LogicTypes = {"int", "float", "bool"}
-AllTypes = {"int", "float", "string", "bool"}
+AllTypes = {"int", "float", "string", "bool", "list", "array"}
+ContainerTypes = {"list", "array"}
 
 
 class Analyzer:
     def __init__(self, source: str):
         self.env_stack: list[Dict[str, TypeInfo]] = [{}]
+        self.functions: Dict[str, FunctionSig] = {}
+        self.function_depth = 0
         self.source_lines = source.splitlines()
 
     def analyze(self, program: ast.Program) -> None:
+        self._register_functions(program.functions)
+        for fn in program.functions:
+            self._analyze_function(fn)
         for stmt in program.statements:
             self._stmt(stmt)
         self._fold_program(program)
@@ -49,13 +71,94 @@ class Analyzer:
             self._stmt(stmt)
         self._pop_env()
 
+    def _register_functions(self, functions: List[ast.Function]):
+        for fn in functions:
+            if fn.name in self.functions:
+                self._err(fn, f"function '{fn.name}' already defined")
+            params: List[ParamInfo] = []
+            seen: set[str] = set()
+            for idx, p in enumerate(fn.params):
+                if p.name in seen:
+                    self._err(p, f"duplicate parameter '{p.name}'")
+                seen.add(p.name)
+                inferred_type = p.type
+                if p.default is not None:
+                    self._push_env()
+                    for earlier in params:
+                        self._env()[earlier.name] = TypeInfo(earlier.type or "auto")
+                    default_type = self._expr(p.default)
+                    self._pop_env()
+                    if inferred_type:
+                        self._ensure_assignable(p, inferred_type, default_type)
+                    else:
+                        inferred_type = default_type
+                params.append(ParamInfo(p.name, inferred_type, p.default is not None))
+                p.type = inferred_type
+            self.functions[fn.name] = FunctionSig(fn.name, params)
+
+    def _analyze_function(self, fn: ast.Function):
+        sig = self.functions.get(fn.name)
+        if not sig:
+            return
+        self._push_env()
+        self.function_depth += 1
+        for p in sig.params:
+            self._env()[p.name] = TypeInfo(p.type or "auto")
+        for stmt in fn.body:
+            self._stmt(stmt)
+        self.function_depth -= 1
+        self._pop_env()
+
+    def _check_call(self, node: ast.Call):
+        sig = self.functions.get(node.name)
+        if not sig:
+            known = ", ".join(sorted(self.functions.keys())) or "none"
+            self._err(node, f"undefined function '{node.name}'. known: {known}")
+        provided: dict[str, str] = {}
+        positional_index = 0
+        for arg in node.args:
+            arg_type = self._expr(arg.value)
+            param = None
+            if arg.name:
+                for p in sig.params:
+                    if p.name == arg.name:
+                        param = p
+                        break
+                if param is None:
+                    self._err(
+                        arg,
+                        f"unknown parameter '{arg.name}' for function '{node.name}'",
+                    )
+                if arg.name in provided:
+                    self._err(arg, f"duplicate argument for '{arg.name}'")
+            else:
+                if positional_index >= len(sig.params):
+                    self._err(arg, f"too many arguments for '{node.name}'")
+                param = sig.params[positional_index]
+                positional_index += 1
+            if param.type:
+                self._ensure_assignable(arg, param.type, arg_type)
+            provided[param.name] = arg_type
+
+        for p in sig.params:
+            if p.name not in provided and not p.has_default:
+                self._err(
+                    node, f"missing argument for '{p.name}' in call to '{node.name}'"
+                )
+
     def _stmt(self, node: ast.Stmt):
         if isinstance(node, ast.Declaration):
             if self._env().get(node.name):
                 self._err(node, f"variable '{node.name}' already declared")
-            if node.type not in AllTypes:
+            if node.type and node.type not in AllTypes:
                 self._err(node, f"unknown type '{node.type}'")
-            self._env()[node.name] = TypeInfo(node.type)
+            literal_size = None
+            if node.type in ContainerTypes and node.size is not None:
+                size_type = self._expr(node.size)
+                if size_type not in Numeric:
+                    self._err(node, "container size must be numeric")
+                literal_size = self._literal_int_value(node.size)
+            self._env()[node.name] = TypeInfo(node.type or "auto", literal_size)
             return
         if isinstance(node, ast.Input):
             if node.type:
@@ -71,12 +174,41 @@ class Analyzer:
             return
         if isinstance(node, ast.Assign):
             t = self._expr(node.expr)
-            existing = self._lookup(node.name)
-            if existing:
-                self._ensure_assignable(node, existing.name, t)
-                self._env()[node.name] = existing  # ensure current scope sees it
+            if node.type:
+                if node.type not in AllTypes:
+                    self._err(node, f"unknown type '{node.type}'")
+                existing = self._lookup(node.name)
+                if existing and existing.name not in {None, "auto", node.type}:
+                    self._ensure_assignable(node, existing.name, node.type)
+                self._ensure_assignable(node, node.type, t)
+                self._env()[node.name] = TypeInfo(node.type)
             else:
-                self._env()[node.name] = TypeInfo(t)
+                existing = self._lookup(node.name)
+                if existing:
+                    self._ensure_assignable(node, existing.name, t)
+                    self._env()[node.name] = existing  # ensure current scope sees it
+                else:
+                    self._env()[node.name] = TypeInfo(t)
+            return
+        if isinstance(node, ast.IndexAssign):
+            base = self._lookup(node.name)
+            if not base:
+                self._err(node, f"variable '{node.name}' not declared")
+            if base.name not in ContainerTypes:
+                self._err(node, f"indexing requires list/array (got {base.name})")
+            idx_type = self._expr(node.index)
+            if idx_type not in Numeric:
+                self._err(node, "index must be numeric")
+            idx_literal = self._literal_int_value(node.index)
+            if base.size is not None and idx_literal is not None:
+                if idx_literal < 0 or idx_literal >= base.size:
+                    self._err(
+                        node,
+                        f"index {idx_literal} out of bounds for '{node.name}' of size {base.size}",
+                    )
+            val_type = self._expr(node.expr)
+            if val_type not in Numeric:
+                self._err(node, "container elements must be numeric")
             return
         if isinstance(node, ast.Print):
             for value in node.values:
@@ -106,6 +238,15 @@ class Analyzer:
                 self._stmt(s)
             self._pop_env()
             return
+        if isinstance(node, ast.Call):
+            self._check_call(node)
+            return
+        if isinstance(node, ast.Return):
+            if self.function_depth <= 0:
+                self._err(node, "'return' outside function")
+            for v in node.values:
+                self._expr(v)
+            return
         self._err(node, f"Unhandled statement {node}")
 
     # --- expressions ---
@@ -118,38 +259,65 @@ class Analyzer:
             t = self._lookup(node.name)
             if not t:
                 self._err(node, f"undefined variable '{node.name}'")
-            return t.name
+            return t.name or "auto"
+        if isinstance(node, ast.Index):
+            base = self._lookup(node.name)
+            if not base:
+                self._err(node, f"variable '{node.name}' not declared")
+            if base.name not in ContainerTypes:
+                self._err(node, f"indexing requires list/array (got {base.name})")
+            idx_type = self._expr(node.index)
+            if idx_type not in Numeric:
+                self._err(node, "index must be numeric")
+            idx_literal = self._literal_int_value(node.index)
+            if base.size is not None and idx_literal is not None:
+                if idx_literal < 0 or idx_literal >= base.size:
+                    self._err(
+                        node,
+                        f"index {idx_literal} out of bounds for '{node.name}' of size {base.size}",
+                    )
+            return "float"
         if isinstance(node, ast.Unary):
+            op = node.op
             t = self._expr(node.right)
-            if t not in Numeric:
-                self._err(node, f"unary {node.op} requires numeric operand (got {t})")
-            return t
+            if op in {"+", "-"}:
+                if not self._is_numeric(t):
+                    self._err(node, f"unary {op} requires numeric operand (got {t})")
+                return t
+            if op in {"!", "not"}:
+                if not self._is_logic(t):
+                    self._err(
+                        node,
+                        f"unary {op} requires numeric/bool-like operand (got {t})",
+                    )
+                return "bool"
+            self._err(node, f"unhandled unary op {op}")
         if isinstance(node, ast.Binary):
             lt = self._expr(node.left)
             rt = self._expr(node.right)
             op = node.op
             if op in {"+", "-", "*", "/", "add", "subtract", "multiply", "divide"}:
-                if lt not in Numeric or rt not in Numeric:
+                if not self._is_numeric(lt) or not self._is_numeric(rt):
                     self._err(
                         node,
                         f"arithmetic '{op}' requires numeric operands (got {lt}, {rt})",
                     )
-                return "float" if "float" in (lt, rt) else "int"
+                return "float" if "float" in (lt, rt) else lt or rt or "int"
             if op in {"==", "!="}:
                 if lt == rt:
                     return "bool"
-                if lt in Numeric and rt in Numeric:
+                if self._is_numeric(lt) and self._is_numeric(rt):
                     return "bool"
                 self._err(node, f"incompatible types for equality: {lt} vs {rt}")
             if op in {">", "<", ">=", "<="}:
-                if lt in Numeric and rt in Numeric:
+                if self._is_numeric(lt) and self._is_numeric(rt):
                     return "bool"
                 self._err(
                     node,
                     f"ordering comparison requires numeric operands (got {lt}, {rt})",
                 )
             if op in {"and", "&", "or", "|"}:
-                if lt not in LogicTypes or rt not in LogicTypes:
+                if not self._is_logic(lt) or not self._is_logic(rt):
                     self._err(
                         node,
                         f"logical '{op}' requires numeric/bool-like operands (got {lt}, {rt})",
@@ -159,7 +327,7 @@ class Analyzer:
         if isinstance(node, ast.Power):
             bt = self._expr(node.base)
             et = self._expr(node.exponent)
-            if bt not in Numeric or et not in Numeric:
+            if not self._is_numeric(bt) or not self._is_numeric(et):
                 self._err(node, f"power requires numeric operands (got {bt}, {et})")
             return "float" if "float" in (bt, et) else "int"
         self._err(node, f"Unhandled expr {node}")
@@ -182,6 +350,10 @@ class Analyzer:
         return None
 
     def _ensure_assignable(self, node: ast.Node, target_type: str, expr_type: str):
+        if target_type in {None, "auto"}:
+            return
+        if expr_type in {None, "auto"}:
+            return
         if target_type == expr_type:
             return
         if target_type == "float" and expr_type in {"int", "float"}:
@@ -192,6 +364,7 @@ class Analyzer:
 
     # --- folding ---
     def _fold_program(self, program: ast.Program) -> None:
+        program.functions = [self._fold_function(fn) for fn in program.functions]
         program.statements = [self._fold_stmt(s) for s in program.statements]
 
     def _fold_stmt(self, stmt: ast.Stmt) -> ast.Stmt:
@@ -199,6 +372,13 @@ class Analyzer:
             stmt.expr = self._fold_expr(stmt.expr)
         elif isinstance(stmt, ast.Print):
             stmt.values = [self._fold_expr(v) for v in stmt.values]
+        elif isinstance(stmt, ast.Call):
+            stmt.args = [
+                ast.Arg(
+                    name=a.name, value=self._fold_expr(a.value), line=a.line, col=a.col
+                )
+                for a in stmt.args
+            ]
         elif isinstance(stmt, ast.If):
             stmt.first.cond = self._fold_expr(stmt.first.cond)
             stmt.first.body = [self._fold_stmt(s) for s in stmt.first.body]
@@ -221,6 +401,11 @@ class Analyzer:
             stmt.end = self._fold_expr(stmt.end)
             stmt.body = [self._fold_stmt(s) for s in stmt.body]
         return stmt
+
+    def _fold_function(self, fn: ast.Function) -> ast.Function:
+        fn.params = [fn_param for fn_param in fn.params]
+        fn.body = [self._fold_stmt(s) for s in fn.body]
+        return fn
 
     def _fold_expr(self, expr: ast.Expr) -> ast.Expr:
         if isinstance(expr, ast.Binary):
@@ -276,6 +461,14 @@ class Analyzer:
             return str(int(val))
         return str(val)
 
+    def _literal_int_value(self, expr: ast.Expr) -> Optional[int]:
+        if isinstance(expr, ast.Number) and not self._is_float_literal(expr.value):
+            try:
+                return int(expr.value)
+            except ValueError:
+                return None
+        return None
+
     # --- error reporting ---
     def _err(self, node: ast.Node, msg: str):
         line = getattr(node, "line", None)
@@ -289,6 +482,12 @@ class Analyzer:
     # --- helpers ---
     def _is_float_literal(self, lexeme: str) -> bool:
         return "." in lexeme
+
+    def _is_numeric(self, typ: Optional[str]) -> bool:
+        return typ in Numeric or typ in {"auto", None}
+
+    def _is_logic(self, typ: Optional[str]) -> bool:
+        return typ in LogicTypes or typ in {"auto", None}
 
 
 __all__ = ["Analyzer", "SemanticError", "TypeInfo"]

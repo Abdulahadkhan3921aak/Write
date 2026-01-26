@@ -1,0 +1,6 @@
+# Demonstrates make with list/array and typeless declaration
+make nums as list
+make coords as array
+make count
+set count to 3
+print "List and array declarations created"

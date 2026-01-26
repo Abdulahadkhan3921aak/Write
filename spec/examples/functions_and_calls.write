@@ -1,0 +1,14 @@
+# Functions and calls with typed parameters
+function "scale"(x:float, factor:float)
+ set result to multiply x and factor
+ return result
+end function
+
+function "bump"(value:int)
+ set next to add value and 1
+ return next
+end function
+
+set input_value to 3
+call "scale" with arguments:(input_value, 2)
+call "bump" with arguments:(5)

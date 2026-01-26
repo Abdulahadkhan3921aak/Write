@@ -1,0 +1,49 @@
+# Full language tour: declarations, expressions, control flow, functions, containers
+
+# Scalar declarations (typed and typeless)
+make counter as int
+make ratio as float
+make message as string
+make flag as int
+make auto_num
+
+set counter to 3
+set ratio to divide 7 and 2
+set message to "hello write"
+set flag to 0
+set auto_num to add counter and 4
+
+# Sized container
+make values as list of size 5
+set values[0] to 1
+set values[1] to 1
+set values[2] to add values[0] and values[1]
+set values[3] to add values[2] and 1
+set values[4] to add values[2] and values[3]
+
+# Function definition and call
+function "sum_to"(n:int)
+ set acc to 0
+ for i from 1 to n do
+  set acc to add acc and i
+ end for
+ return acc
+end function
+
+call "sum_to" with arguments:(counter)
+
+# While loop with condition
+while counter > 0 do
+ print counter
+ set counter to subtract counter and 1
+end while
+
+# If/else
+if ratio > 3 then
+ print "ratio bigger than 3"
+else
+ print "ratio not bigger than 3"
+end if
+
+# Print everything
+print message , flag , auto_num , values[4]

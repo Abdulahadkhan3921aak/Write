@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from build_paths import BuildPaths
+from highlighter import WriteHighlighter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WRITEC = PROJECT_ROOT / "write" / "Scripts" / "python.exe"
@@ -15,85 +20,40 @@ WRITEC_ENTRY = "compiler.writec"
 SAMPLES_DIR = PROJECT_ROOT / "spec" / "examples"
 
 
-class WriteHighlighter(QtGui.QSyntaxHighlighter):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.rules = []
-
-        kw_format = QtGui.QTextCharFormat()
-        kw_format.setForeground(QtGui.QColor("#0057b7"))
-        kw_format.setFontWeight(QtGui.QFont.Bold)
-        keywords = [
-            "set",
-            "to",
-            "print",
-            "if",
-            "else",
-            "end",
-            "then",
-            "while",
-            "do",
-            "for",
-            "from",
-            "and",
-            "or",
-            "not",
-            "is",
-            "greater",
-            "less",
-            "equal",
-            "than",
-            "add",
-            "subtract",
-            "multiply",
-            "divide",
-            "power",
-        ]
-        for kw in keywords:
-            pattern = QtCore.QRegularExpression(rf"\b{kw}\b")
-            self.rules.append((pattern, kw_format))
-
-        num_format = QtGui.QTextCharFormat()
-        num_format.setForeground(QtGui.QColor("#b71c1c"))
-        self.rules.append((QtCore.QRegularExpression(r"\b\d+(\.\d+)?\b"), num_format))
-
-        str_format = QtGui.QTextCharFormat()
-        str_format.setForeground(QtGui.QColor("#2e7d32"))
-        self.rules.append(
-            (QtCore.QRegularExpression(r'"[^"\\]*(?:\\.[^"\\]*)*"'), str_format)
-        )
-
-        comment_format = QtGui.QTextCharFormat()
-        comment_format.setForeground(QtGui.QColor("#9e9e9e"))
-        self.rules.append((QtCore.QRegularExpression(r"#.*"), comment_format))
-
-    def highlightBlock(self, text: str):
-        for pattern, fmt in self.rules:
-            it = pattern.globalMatch(text)
-            while it.hasNext():
-                match = it.next()
-                self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
-
-
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, workspace: Path | None = None):
         super().__init__()
-        self._current_path: Path | None = None
         self.setWindowTitle("Write IDE (PySide6)")
         self._editor_base_font_size = None
-        self._cpp_visible = True
+        self._cpp_visible = False
+        self.settings = QtCore.QSettings("WriteIDE", "Write")
+        self.compiler_path = Path(self.settings.value("compiler_path", str(WRITEC)))
+        self.compiler_extra_args = self.settings.value("compiler_extra_args", "")
+        self.last_opened = self.settings.value("last_opened", None)
+        self.workspace_root: Path | None = workspace
+        self.proc: QtCore.QProcess | None = None
+        self._tab_paths: dict[QtWidgets.QWidget, Path | None] = {}
+        self.build_paths = BuildPaths()
         self._build_ui()
         self._setup_menu()
+        if self.workspace_root:
+            self._set_workspace_root(self.workspace_root)
 
     def _build_ui(self):
-        self.editor = QtWidgets.QPlainTextEdit()
-        self.editor.setPlaceholderText("Write code here…")
-        WriteHighlighter(self.editor.document())
-        self._editor_base_font_size = self.editor.font().pointSize()
+        mono_font = QtGui.QFont("Consolas", 14)
+
+        self.editor_tabs = QtWidgets.QTabWidget()
+        self.editor_tabs.setTabsClosable(True)
+        self.editor_tabs.tabCloseRequested.connect(self._close_tab)
+        self.editor_tabs.currentChanged.connect(self._on_tab_changed)
+
+        # start with no workspace and no documents; user opens or creates
+        self._editor_base_font_size = mono_font.pointSize()
 
         self.cpp_view = QtWidgets.QPlainTextEdit()
         self.cpp_view.setReadOnly(True)
         self.cpp_view.setPlaceholderText("Generated C++ will appear here…")
+        self.cpp_view.setFont(mono_font)
 
         self.output_tabs = QtWidgets.QTabWidget()
         self.output_tabs.setTabPosition(QtWidgets.QTabWidget.South)
@@ -101,22 +61,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("Logs…")
+        self.log_view.setFont(mono_font)
         self.output_tabs.addTab(self.log_view, "Logs")
 
         self.warn_view = QtWidgets.QPlainTextEdit()
         self.warn_view.setReadOnly(True)
         self.warn_view.setPlaceholderText("Warnings…")
+        self.warn_view.setFont(mono_font)
         self.output_tabs.addTab(self.warn_view, "Warnings")
 
         self.error_view = QtWidgets.QPlainTextEdit()
         self.error_view.setReadOnly(True)
         self.error_view.setPlaceholderText("Errors…")
+        self.error_view.setFont(mono_font)
         self.output_tabs.addTab(self.error_view, "Errors")
 
         self.terminal_view = QtWidgets.QPlainTextEdit()
         self.terminal_view.setReadOnly(True)
         self.terminal_view.setPlaceholderText("Terminal / Output…")
+        self.terminal_view.setFont(mono_font)
         self.output_tabs.addTab(self.terminal_view, "Terminal / Output")
+
+        term_input_bar = QtWidgets.QHBoxLayout()
+        term_input_bar.setContentsMargins(0, 0, 0, 0)
+        term_input_bar.setSpacing(4)
+        self.terminal_input = QtWidgets.QLineEdit()
+        self.terminal_input.setPlaceholderText("Type input for running program…")
+        send_btn = QtWidgets.QPushButton("Send")
+        send_btn.clicked.connect(self._send_stdin)
+        term_input_bar.addWidget(QtWidgets.QLabel("Stdin:"))
+        term_input_bar.addWidget(self.terminal_input, 1)
+        term_input_bar.addWidget(send_btn)
+
+        self.diagnostics_view = QtWidgets.QListWidget()
+        self.diagnostics_view.itemClicked.connect(self._jump_to_diagnostic)
+        self.output_tabs.addTab(self.diagnostics_view, "Diagnostics")
+
+        self.fs_model = QtWidgets.QFileSystemModel()
+        self.fs_model.setFilter(
+            QtCore.QDir.AllDirs | QtCore.QDir.NoDotAndDotDot | QtCore.QDir.Files
+        )
+        self.fs_model.setNameFilters(["*.write", "*.txt", "*.cpp", "*"])
+        self.fs_model.setNameFilterDisables(False)
+        self.fs_model.setRootPath("")
+
+        self.file_view = QtWidgets.QTreeView()
+        self.file_view.setModel(self.fs_model)
+        self.file_view.setHeaderHidden(True)
+        for col in range(1, 4):
+            self.file_view.setColumnHidden(col, True)
+        self.file_view.doubleClicked.connect(self._open_from_tree)
+        self.file_view.setMinimumWidth(200)
+        self.file_view.setVisible(False)
+        self.file_view.setEnabled(False)
 
         clear_bar = QtWidgets.QHBoxLayout()
         clear_bar.setContentsMargins(0, 0, 0, 0)
@@ -134,9 +131,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs_layout.setSpacing(4)
         tabs_layout.addLayout(clear_bar)
         tabs_layout.addWidget(self.output_tabs)
+        tabs_layout.addLayout(term_input_bar)
 
         open_btn = QtWidgets.QPushButton("Open…")
         open_btn.clicked.connect(self.open_file)
+        open_folder_btn = QtWidgets.QPushButton("Open Folder…")
+        open_folder_btn.clicked.connect(self.open_folder)
         save_btn = QtWidgets.QPushButton("Save As…")
         save_btn.clicked.connect(self.save_file)
         transpile_btn = QtWidgets.QPushButton("Transpile")
@@ -145,54 +145,77 @@ class MainWindow(QtWidgets.QMainWindow):
         compile_btn.clicked.connect(self.compile_only)
         run_btn = QtWidgets.QPushButton("Run")
         run_btn.clicked.connect(self.run_binary)
-        load_sample_btn = QtWidgets.QPushButton("Load Sample…")
-        load_sample_btn.clicked.connect(self.open_sample)
+
+        self.external_run_checkbox = QtWidgets.QCheckBox(
+            "Run in external console (new window)"
+        )
+        self.external_run_checkbox.setChecked(True)
+
+        self.sample_box = QtWidgets.QComboBox()
+        self.sample_box.setMinimumWidth(200)
+        self._refresh_samples()
+        sample_btn = QtWidgets.QPushButton("Load Sample")
+        sample_btn.clicked.connect(self.load_selected_sample)
 
         buttons = QtWidgets.QHBoxLayout()
-        for b in [
-            open_btn,
-            save_btn,
-            load_sample_btn,
-            transpile_btn,
-            compile_btn,
-            run_btn,
-        ]:
-            buttons.addWidget(b)
+        buttons.addWidget(open_btn)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(open_folder_btn)
+        buttons.addSpacing(8)
+        buttons.addWidget(QtWidgets.QLabel("Sample:"))
+        buttons.addWidget(self.sample_box)
+        buttons.addWidget(sample_btn)
+        buttons.addSpacing(8)
+        buttons.addWidget(transpile_btn)
+        buttons.addWidget(compile_btn)
+        buttons.addWidget(run_btn)
+        buttons.addWidget(self.external_run_checkbox)
         buttons.addStretch(1)
 
         self.code_splitter = QtWidgets.QSplitter()
         self.code_splitter.setOrientation(QtCore.Qt.Horizontal)
-        self.code_splitter.addWidget(self.editor)
+        self.code_splitter.addWidget(self.editor_tabs)
         self.code_splitter.addWidget(self.cpp_view)
         self.code_splitter.setSizes([3, 2])
+        self.cpp_view.setVisible(self._cpp_visible)
+        if not self._cpp_visible:
+            self.code_splitter.setSizes([1, 0])
 
         splitter = QtWidgets.QSplitter()
         splitter.setOrientation(QtCore.Qt.Vertical)
         splitter.addWidget(self.code_splitter)
         splitter.addWidget(tabs_container)
-        splitter.setSizes([3, 1])
+        splitter.setSizes([8, 2])
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 1)
+
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        main_splitter.addWidget(self.file_view)
+        main_splitter.addWidget(splitter)
+        main_splitter.setSizes([1, 4])
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.addLayout(buttons)
-        layout.addWidget(splitter)
+        layout.addWidget(main_splitter)
         self.setCentralWidget(central)
 
     def _setup_menu(self):
         menubar = self.menuBar()
         view_menu = menubar.addMenu("View")
+        tools_menu = menubar.addMenu("Tools")
 
-        inc_font = QtWidgets.QAction("Increase Editor Font", self)
+        inc_font = QtGui.QAction("Increase Editor Font", self)
         inc_font.triggered.connect(lambda: self._adjust_editor_font(1))
-        dec_font = QtWidgets.QAction("Decrease Editor Font", self)
+        dec_font = QtGui.QAction("Decrease Editor Font", self)
         dec_font.triggered.connect(lambda: self._adjust_editor_font(-1))
-        reset_font = QtWidgets.QAction("Reset Editor Font", self)
+        reset_font = QtGui.QAction("Reset Editor Font", self)
         reset_font.triggered.connect(self._reset_editor_font)
 
-        toggle_split = QtWidgets.QAction("Toggle Code Split Orientation", self)
+        toggle_split = QtGui.QAction("Toggle Code Split Orientation", self)
         toggle_split.triggered.connect(self._toggle_code_split)
 
-        toggle_cpp = QtWidgets.QAction("Show/Hide C++ Pane", self)
+        toggle_cpp = QtGui.QAction("Show/Hide C++ Pane", self)
         toggle_cpp.triggered.connect(self._toggle_cpp_visibility)
 
         view_menu.addAction(inc_font)
@@ -201,6 +224,70 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(toggle_split)
         view_menu.addAction(toggle_cpp)
+
+        set_compiler = QtGui.QAction("Set Compiler Path…", self)
+        set_compiler.triggered.connect(self._set_compiler_path)
+        set_flags = QtGui.QAction("Set Extra Flags…", self)
+        set_flags.triggered.connect(self._set_extra_flags)
+        tools_menu.addAction(set_compiler)
+        tools_menu.addAction(set_flags)
+
+    # --- editor tab helpers ---
+    def _create_editor(self, text: str = "") -> QtWidgets.QPlainTextEdit:
+        editor = QtWidgets.QPlainTextEdit()
+        editor.setPlaceholderText("Write code here…")
+        font = QtGui.QFont("Consolas", 14)
+        editor.setFont(font)
+        WriteHighlighter(editor.document())
+        editor.setPlainText(text)
+        return editor
+
+    def _open_text_in_tab(self, text: str, path: Path | None, label: str):
+        editor = self._create_editor(text)
+        idx = self.editor_tabs.addTab(editor, label)
+        self.editor_tabs.setCurrentIndex(idx)
+        self._tab_paths[editor] = path
+        if path:
+            self.editor_tabs.setTabToolTip(idx, str(path))
+
+    def _ensure_tab_for_restore(self, path: Path, text: str):
+        editor = self._current_editor()
+        if editor and not editor.toPlainText().strip():
+            editor.setPlainText(text)
+            self._set_current_path(path)
+            return
+        self._open_text_in_tab(text, path, path.name)
+
+    def _current_editor(self) -> QtWidgets.QPlainTextEdit | None:
+        widget = self.editor_tabs.currentWidget()
+        return widget if isinstance(widget, QtWidgets.QPlainTextEdit) else None
+
+    def _current_path(self) -> Path | None:
+        editor = self._current_editor()
+        return self._tab_paths.get(editor) if editor else None
+
+    def _set_current_path(self, path: Path | None):
+        editor = self._current_editor()
+        if not editor:
+            return
+        self._tab_paths[editor] = path
+        idx = self.editor_tabs.indexOf(editor)
+        if idx >= 0:
+            label = path.name if path else "Untitled"
+            self.editor_tabs.setTabText(idx, label)
+            if path:
+                self.editor_tabs.setTabToolTip(idx, str(path))
+
+    def _close_tab(self, index: int):
+        widget = self.editor_tabs.widget(index)
+        if widget:
+            self.build_paths.cleanup_for_editor(id(widget))
+            self._tab_paths.pop(widget, None)
+            widget.deleteLater()
+        self.editor_tabs.removeTab(index)
+
+    def _on_tab_changed(self, _index: int):
+        self._clear_highlights()
 
     # --- file ops ---
     def open_file(self):
@@ -212,10 +299,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        self._current_path = Path(path)
-        text = self._current_path.read_text(encoding="utf-8")
-        self.editor.setPlainText(text)
-        self._log(f"Opened {self._current_path.name}")
+        p = Path(path)
+        text = p.read_text(encoding="utf-8")
+        self._open_text_in_tab(text, p, p.name)
+        self._log(f"Opened {p.name}")
+        self._store_last_file(p)
+
+    def open_folder(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Open folder as workspace", str(PROJECT_ROOT)
+        )
+        if not path:
+            return
+        self._set_workspace_root(Path(path))
 
     def open_sample(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -228,112 +324,207 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.load_sample(Path(path))
 
+    def _set_workspace_root(self, root: Path):
+        self.workspace_root = root
+        self.fs_model.setRootPath(str(root))
+        self.file_view.setRootIndex(self.fs_model.index(str(root)))
+        self.file_view.setVisible(True)
+        self.file_view.setEnabled(True)
+        self._log(f"Workspace set to {root}")
+
     def save_file(self):
+        editor = self._current_editor()
+        if not editor:
+            self._warn("No document to save")
+            return
+        current_path = self._current_path()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Write file",
-            str(self._current_path.parent if self._current_path else PROJECT_ROOT),
+            str(current_path.parent if current_path else PROJECT_ROOT),
             "Write Files (*.write)",
         )
         if not path:
             return
-        self._current_path = Path(path)
-        self._current_path.write_text(self.editor.toPlainText(), encoding="utf-8")
-        self._log(f"Saved {self._current_path.name}")
+        p = Path(path)
+        p.write_text(editor.toPlainText(), encoding="utf-8")
+        self._set_current_path(p)
+        self._log(f"Saved {p.name}")
+        self._store_last_file(p)
 
     def load_sample(self, path: Path):
-        self._current_path = None
         text = Path(path).read_text(encoding="utf-8")
-        self.editor.setPlainText(text)
+        self._open_text_in_tab(text, path, path.name)
         self._log(f"Loaded sample {path.name}")
+        self._store_last_file(path)
+
+    def load_selected_sample(self):
+        selected = self.sample_box.currentData()
+        if selected:
+            self.load_sample(selected)
+
+    def _open_from_tree(self, index: QtCore.QModelIndex):
+        path = Path(self.fs_model.filePath(index))
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            self._open_text_in_tab(text, path, path.name)
+            self._log(f"Opened {path.name}")
+            self._store_last_file(path)
 
     # --- Actions ---
     def transpile_only(self):
-        src = self.editor.toPlainText()
+        editor = self._current_editor()
+        if not editor:
+            self._warn("No source to transpile")
+            return
+        src = editor.toPlainText()
         if not src.strip():
             self._warn("No source to transpile")
             return
         self._reset_command_outputs()
-        tmp_in = PROJECT_ROOT / "tmp_gui_input.write"
-        tmp_cpp = PROJECT_ROOT / "tmp_gui_output.cpp"
-        tmp_in.write_text(src, encoding="utf-8")
-        cmd = [
-            str(WRITEC),
-            WRITEC_MODULE,
-            WRITEC_ENTRY,
-            str(tmp_in),
-            "--out",
-            str(tmp_cpp),
-        ]
+        self._stop_process()
+        plan = self.build_paths.plan_transpile(id(editor), self._current_path())
+        plan.ensure_dirs()
+        plan.cpp_path.unlink(missing_ok=True)
+        plan.input_path.write_text(src, encoding="utf-8")
+        cmd = self._build_cmd(
+            [
+                str(plan.input_path),
+                "--out",
+                str(plan.cpp_path),
+            ]
+        )
         self._run_cmd(cmd)
-        if tmp_cpp.exists():
-            self.cpp_view.setPlainText(tmp_cpp.read_text(encoding="utf-8"))
+        if plan.cpp_path.exists():
+            self.cpp_view.setPlainText(plan.cpp_path.read_text(encoding="utf-8"))
 
     def compile_only(self):
-        src = self.editor.toPlainText()
+        editor = self._current_editor()
+        if not editor:
+            self._warn("No source to compile")
+            return
+        src = editor.toPlainText()
         if not src.strip():
             self._warn("No source to compile")
             return
         self._reset_command_outputs()
-        tmp_in = PROJECT_ROOT / "tmp_gui_input.write"
-        tmp_cpp = PROJECT_ROOT / "tmp_gui_output.cpp"
-        tmp_bin = PROJECT_ROOT / (
-            "tmp_gui_output.exe" if sys.platform.startswith("win") else "tmp_gui_output"
+        self._stop_process()
+        plan = self.build_paths.plan_compile(
+            id(editor),
+            self._current_path(),
+            sys.platform.startswith("win"),
         )
-        tmp_in.write_text(src, encoding="utf-8")
-        cmd = [
-            str(WRITEC),
-            WRITEC_MODULE,
-            WRITEC_ENTRY,
-            str(tmp_in),
-            "--out",
-            str(tmp_cpp),
-            "--compile",
-            "--out-bin",
-            str(tmp_bin),
-        ]
+        plan.ensure_dirs()
+        plan.cpp_path.unlink(missing_ok=True)
+        if plan.bin_path:
+            plan.bin_path.unlink(missing_ok=True)
+        plan.input_path.write_text(src, encoding="utf-8")
+        cmd = self._build_cmd(
+            [
+                str(plan.input_path),
+                "--out",
+                str(plan.cpp_path),
+                "--compile",
+                "--out-bin",
+                str(plan.bin_path),
+            ]
+        )
         self._run_cmd(cmd)
-        if tmp_cpp.exists():
-            self.cpp_view.setPlainText(tmp_cpp.read_text(encoding="utf-8"))
+        if plan.cpp_path.exists():
+            self.cpp_view.setPlainText(plan.cpp_path.read_text(encoding="utf-8"))
 
     def run_binary(self):
-        src = self.editor.toPlainText()
+        editor = self._current_editor()
+        if not editor:
+            self._warn("No source to run")
+            return
+        src = editor.toPlainText()
         if not src.strip():
             self._warn("No source to run")
             return
         self._reset_command_outputs()
-        tmp_in = PROJECT_ROOT / "tmp_gui_input.write"
-        tmp_cpp = PROJECT_ROOT / "tmp_gui_output.cpp"
-        tmp_bin = PROJECT_ROOT / (
-            "tmp_gui_output.exe" if sys.platform.startswith("win") else "tmp_gui_output"
+        self._stop_process()
+        plan = self.build_paths.plan_compile(
+            id(editor),
+            self._current_path(),
+            sys.platform.startswith("win"),
         )
-        tmp_in.write_text(src, encoding="utf-8")
-        cmd = [
-            str(WRITEC),
-            WRITEC_MODULE,
-            WRITEC_ENTRY,
-            str(tmp_in),
-            "--out",
-            str(tmp_cpp),
-            "--run",
-            "--out-bin",
-            str(tmp_bin),
-        ]
-        self._run_cmd(cmd)
-        if tmp_cpp.exists():
-            self.cpp_view.setPlainText(tmp_cpp.read_text(encoding="utf-8"))
+        plan.ensure_dirs()
+        plan.cpp_path.unlink(missing_ok=True)
+        if plan.bin_path:
+            plan.bin_path.unlink(missing_ok=True)
+        plan.input_path.write_text(src, encoding="utf-8")
+        cmd = self._build_cmd(
+            [
+                str(plan.input_path),
+                "--out",
+                str(plan.cpp_path),
+                "--compile",
+                "--out-bin",
+                str(plan.bin_path),
+            ]
+        )
+        result = self._run_cmd_collect(cmd)
+        if result.returncode != 0:
+            return
+        if plan.cpp_path.exists():
+            self.cpp_view.setPlainText(plan.cpp_path.read_text(encoding="utf-8"))
+        if plan.bin_path and plan.bin_path.exists():
+            if self.external_run_checkbox.isChecked():
+                self._run_external_console(plan.bin_path)
+            else:
+                self._start_process(plan.bin_path)
 
     def _run_cmd(self, cmd):
-        self._terminal("$ " + " ".join(cmd))
+        self._log("$ " + " ".join(cmd))
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.stdout:
-            self._terminal("[stdout]\n" + result.stdout)
+            self._route_stdout(result.stdout)
         if result.stderr:
             self._error("[stderr]\n" + result.stderr)
         if result.returncode != 0:
             self._error(f"[exit {result.returncode}]")
+            self._show_diagnostics(result.stderr)
         else:
             self._log("Command completed successfully")
+        return result
+
+    def _run_cmd_collect(self, cmd):
+        self._log("$ " + " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.stdout:
+            self._route_stdout(result.stdout)
+        if result.stderr:
+            self._error("[stderr]\n" + result.stderr)
+        if result.returncode != 0:
+            self._error(f"[exit {result.returncode}]")
+            self._show_diagnostics(result.stderr)
+        else:
+            self._log("Command completed successfully")
+        return result
+
+    def _route_stdout(self, stdout: str):
+        for line in stdout.splitlines():
+            if not line:
+                continue
+            if (
+                line.startswith("[writec]")
+                or line.startswith("wrote ")
+                or line.startswith("compile:")
+                or line.startswith("compiled")
+            ):
+                self._log(line)
+            elif line.startswith("[stdout]"):
+                self._terminal(line)
+            else:
+                self._terminal(line)
+
+    def _build_cmd(self, args: list[str]):
+        cmd = [str(self.compiler_path), WRITEC_MODULE, WRITEC_ENTRY]
+        cmd.extend(args)
+        if self.compiler_extra_args:
+            cmd.extend(self.compiler_extra_args.split())
+        return cmd
 
     def _log(self, msg: str):
         self._append_to_tab(self.log_view, msg)
@@ -358,6 +549,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """Clear non-log tabs so each action starts fresh."""
         for v in (self.warn_view, self.error_view, self.terminal_view):
             v.clear()
+        self.diagnostics_view.clear()
+        self._clear_highlights()
+        self.terminal_input.clear()
+        self.cpp_view.clear()
 
     def _add_clear_button(
         self, layout: QtWidgets.QHBoxLayout, label: str, view: QtWidgets.QPlainTextEdit
@@ -370,19 +565,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- view helpers ---
     def _adjust_editor_font(self, delta: int):
-        font = self.editor.font()
+        editor = self._current_editor()
+        if not editor:
+            return
+        font = editor.font()
         size = font.pointSize() or self._editor_base_font_size or 10
         new_size = max(6, size + delta)
         font.setPointSize(new_size)
-        self.editor.setFont(font)
+        editor.setFont(font)
         self.cpp_view.setFont(font)
 
     def _reset_editor_font(self):
         if not self._editor_base_font_size:
             return
-        font = self.editor.font()
+        editor = self._current_editor()
+        if not editor:
+            return
+        font = editor.font()
         font.setPointSize(self._editor_base_font_size)
-        self.editor.setFont(font)
+        editor.setFont(font)
         self.cpp_view.setFont(font)
 
     def _toggle_code_split(self):
@@ -401,6 +602,198 @@ class MainWindow(QtWidgets.QMainWindow):
             self.code_splitter.setSizes([3, 2])
         else:
             self.code_splitter.setSizes([1, 0])
+
+    def _refresh_samples(self):
+        self.sample_box.clear()
+        samples = sorted(SAMPLES_DIR.glob("*.write"))
+        for p in samples:
+            self.sample_box.addItem(p.name, p)
+        if samples:
+            self.sample_box.setCurrentIndex(0)
+
+    # --- settings helpers ---
+    def _store_last_file(self, path: Path):
+        self.last_opened = str(path)
+        self.settings.setValue("last_opened", str(path))
+
+    def _restore_last_file(self):
+        if not self.last_opened:
+            return
+        p = Path(self.last_opened)
+        if p.exists():
+            try:
+                text = p.read_text(encoding="utf-8")
+                self._ensure_tab_for_restore(p, text)
+                self._set_current_path(p if p.suffix == ".write" else None)
+                self._log(f"Restored {p.name}")
+            except Exception:
+                pass
+
+    def _set_compiler_path(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select compiler executable",
+            str(self.compiler_path if self.compiler_path else PROJECT_ROOT),
+            "Python or executable (*.exe *.bat *.cmd);;All files (*)",
+        )
+        if path:
+            self.compiler_path = Path(path)
+            self.settings.setValue("compiler_path", str(path))
+
+    def _set_extra_flags(self):
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Extra flags",
+            "Extra flags passed to compiler (space-separated):",
+            QtWidgets.QLineEdit.Normal,
+            self.compiler_extra_args,
+        )
+        if ok:
+            self.compiler_extra_args = text
+            self.settings.setValue("compiler_extra_args", text)
+
+    # --- process helpers ---
+    def _start_process(self, bin_path: Path):
+        self._stop_process()
+        self.proc = QtCore.QProcess(self)
+        self.proc.setProgram(str(bin_path))
+        self.proc.setWorkingDirectory(str(bin_path.parent))
+        self.proc.setProcessChannelMode(QtCore.QProcess.SeparateChannels)
+        self.proc.readyReadStandardOutput.connect(self._on_proc_stdout)
+        self.proc.readyReadStandardError.connect(self._on_proc_stderr)
+        self.proc.finished.connect(self._on_proc_finished)
+        self.proc.start()
+        self._terminal(f"[run] {bin_path}")
+
+    def _stop_process(self):
+        if self.proc and self.proc.state() != QtCore.QProcess.NotRunning:
+            self.proc.kill()
+            self.proc.waitForFinished(200)
+        self.proc = None
+
+    def _on_proc_stdout(self):
+        if not self.proc:
+            return
+        data = bytes(self.proc.readAllStandardOutput()).decode(errors="ignore")
+        if data:
+            self._terminal(data.rstrip("\n"))
+
+    def _on_proc_stderr(self):
+        if not self.proc:
+            return
+        data = bytes(self.proc.readAllStandardError()).decode(errors="ignore")
+        if data:
+            self._error(data.rstrip("\n"))
+
+    def _on_proc_finished(self, code: int, _status):
+        self._log(f"[run exit {code}]")
+        self.proc = None
+
+    def _run_external_console(self, bin_path: Path):
+        if sys.platform.startswith("win"):
+            try:
+                subprocess.Popen(
+                    ["cmd.exe", "/k", str(bin_path)],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    cwd=str(bin_path.parent),
+                )
+                self._log(f"[run external] {bin_path}")
+            except Exception as exc:
+                self._error(f"Failed to launch external console: {exc}")
+        else:
+            terminal = shutil.which("x-terminal-emulator") or shutil.which(
+                "gnome-terminal"
+            )
+            if not terminal:
+                self._error("No system terminal found to launch external run")
+                return
+            subprocess.Popen([terminal, "-e", str(bin_path)], cwd=str(bin_path.parent))
+            self._log(f"[run external] {bin_path}")
+
+    def _send_stdin(self):
+        if not self.proc or self.proc.state() == QtCore.QProcess.NotRunning:
+            self._warn("No running program to send input to")
+            return
+        text = self.terminal_input.text()
+        if not text:
+            return
+        self.proc.write((text + "\n").encode())
+        self.terminal_input.clear()
+
+    # --- diagnostics helpers ---
+    def _show_diagnostics(self, stderr: str):
+        self.diagnostics_view.clear()
+        self._clear_highlights()
+        if not stderr:
+            return
+        pattern = re.compile(r"at (\d+):(\d+)")
+        line_col: tuple[int, int] | None = None
+        for line in stderr.splitlines():
+            m = pattern.search(line)
+            if m:
+                line_col = (int(m.group(1)), int(m.group(2)))
+            item = QtWidgets.QListWidgetItem(line)
+            item.setData(QtCore.Qt.UserRole, line_col)
+            self.diagnostics_view.addItem(item)
+        if line_col:
+            self._highlight_location(*line_col)
+            self.output_tabs.setCurrentWidget(self.diagnostics_view)
+
+        for hint in self._lint_hints(stderr):
+            item = QtWidgets.QListWidgetItem(f"Hint: {hint}")
+            item.setData(QtCore.Qt.UserRole, None)
+            self.diagnostics_view.addItem(item)
+
+    def _highlight_location(self, line: int, col: int):
+        editor = self._current_editor()
+        if not editor:
+            return
+        cursor = editor.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.Start)
+        cursor.movePosition(QtGui.QTextCursor.Down, n=line - 1)
+        cursor.movePosition(QtGui.QTextCursor.Right, n=max(col - 1, 0))
+        cursor.select(QtGui.QTextCursor.LineUnderCursor)
+        selection = QtWidgets.QTextEdit.ExtraSelection()
+        fmt = QtGui.QTextCharFormat()
+        fmt.setBackground(QtGui.QColor("#ffebee"))
+        selection.format = fmt
+        selection.cursor = cursor
+        editor.setExtraSelections([selection])
+
+    def _clear_highlights(self):
+        editor = self._current_editor()
+        if editor:
+            editor.setExtraSelections([])
+
+    def _jump_to_diagnostic(self, item: QtWidgets.QListWidgetItem):
+        data = item.data(QtCore.Qt.UserRole)
+        if data:
+            line, col = data
+            self._highlight_location(line, col)
+            editor = self._current_editor()
+            if editor:
+                editor.setFocus()
+
+    def _lint_hints(self, stderr: str) -> list[str]:
+        hints: list[str] = []
+        lowered = stderr.lower() if stderr else ""
+        if "function" in lowered or "call" in lowered:
+            hints.append(
+                'Function syntax: function "name" arguments: (a:int, b:float, c="hi") … end_function'
+            )
+            hints.append(
+                'Call syntax: call "name" with arguments:(first=5, second=4.2) or call "name" with arguments:(5,4.2)'
+            )
+        if "unexpected token" in lowered or "expected" in lowered:
+            hints.append(
+                "Check commas inside argument lists and close with end_function/end_func"
+            )
+        return hints
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        self._stop_process()
+        self.build_paths.cleanup_all()
+        super().closeEvent(event)
 
 
 def main():

@@ -1,0 +1,21 @@
+# Named arguments and default parameters
+
+function "greet"(name:string, punctuation:string = "!")
+ print name , punctuation
+ return name
+end function
+
+function "scale_and_shift"(x:float, factor:float = 2, shift:float = 0)
+ set tmp to multiply x and factor
+ set result to add tmp and shift
+ return result
+end function
+
+# Calls using positional, defaulted, and named arguments
+call "greet" with arguments:("Ada")
+call "greet" with arguments:("Turing", "!!!")
+call "greet" with arguments:(name = "Grace", punctuation = "?")
+
+call "scale_and_shift" with arguments:(3)
+call "scale_and_shift" with arguments:(x = 1.5, shift = 4)
+call "scale_and_shift" with arguments:(factor = 3, x = 2, shift = 1)

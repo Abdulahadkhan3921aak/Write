@@ -1,0 +1,13 @@
+# Scenarios that should trigger diagnostics
+# Out-of-bounds index on a sized container
+make xs as list of size 2
+set xs[2] to 5
+
+# Call to unknown function
+call "missing_fn" with arguments:(1)
+
+# Wrong argument count
+function "only_one"(a:int)
+ return a
+end function
+call "only_one" with arguments:(1, 2)
