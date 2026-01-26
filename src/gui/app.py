@@ -10,8 +10,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from build_paths import BuildPaths
-from highlighter import WriteHighlighter
+from .build_paths import BuildPaths
+from .highlighter import WriteHighlighter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WRITEC = PROJECT_ROOT / "write" / "Scripts" / "python.exe"

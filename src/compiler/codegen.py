@@ -43,7 +43,7 @@ class Codegen:
         self._emit("oss << '[';")
         self._emit("for (size_t i = 0; i < v.size(); ++i) {")
         self._push()
-        self._emit("if (i) oss << ", ";")
+        self._emit('if (i) oss << ", ";')
         self._emit("oss << v[i];")
         self._pop()
         self._emit("}")
