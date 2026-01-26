@@ -28,7 +28,7 @@ After scanning IDENT/KEYWORD, if lexeme is in the keyword set, emit the keyword 
 
 Input:
 
-```
+``` write
 set x to add y and 3
 ```
 
@@ -44,7 +44,7 @@ Tokens:
 
 Input:
 
-```
+``` write
 if x is greater than 2 and y <= 5 then
     print "ok"
 end if
@@ -71,7 +71,7 @@ Tokens:
 
 Input:
 
-```
+``` write
 while !(a == 0 | b == 0) do
     print "none is zero"
 end while
@@ -98,7 +98,7 @@ Tokens:
 
 Input:
 
-```
+``` write
 for i from 1 to 3 do
     print i
 end for
@@ -120,7 +120,7 @@ Tokens:
 
 Input:
 
-```
+``` write
 while x is less than 10 do
     set x to add x and 1
 end while

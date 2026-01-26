@@ -26,6 +26,7 @@ class Codegen:
         self._emit("#include <string>")
         self._emit("#include <tuple>")
         self._emit("#include <vector>")
+        self._emit("#include <sstream>")
         self._emit("using namespace std;")
         self._emit("")
         self._emit(
@@ -36,6 +37,20 @@ class Codegen:
         self._emit("template <typename T>")
         self._emit("inline void read_value(T& v) { cin >> v; }")
         self._emit("inline void read_value(std::string& v) { getline(cin >> ws, v); }")
+        self._emit("inline std::string fmt_vector(const std::vector<double>& v) {")
+        self._push()
+        self._emit("std::ostringstream oss;")
+        self._emit("oss << '[';")
+        self._emit("for (size_t i = 0; i < v.size(); ++i) {")
+        self._push()
+        self._emit("if (i) oss << ", ";")
+        self._emit("oss << v[i];")
+        self._pop()
+        self._emit("}")
+        self._emit("oss << ']';")
+        self._emit("return oss.str();")
+        self._pop()
+        self._emit("}")
         self._pop()
         self._emit("} // namespace write_runtime")
         self._emit("")
@@ -95,7 +110,10 @@ class Codegen:
             self._emit(f"{node.name}[{idx_code}] = {expr_code};")
             return
         if isinstance(node, ast.Print):
-            parts = [self._expr(v)[0] for v in node.values]
+            parts = []
+            for v in node.values:
+                code, typ = self._expr(v)
+                parts.append(self._format_for_stream(code, typ))
             joined = " << ".join(parts) if parts else '""'
             self._emit(f"cout << {joined} << endl;")
             return
@@ -290,6 +308,11 @@ class Codegen:
             "list": "std::vector<double>",
             "array": "std::vector<double>",
         }.get(typ, "auto")
+
+    def _format_for_stream(self, code: str, typ: Optional[str]) -> str:
+        if typ in {"list", "array"}:
+            return f"write_runtime::fmt_vector({code})"
+        return code
 
     def _emit_input(self, name: str, typ: Optional[str], prompt: Optional[str]):
         if prompt:

@@ -4,7 +4,7 @@
 
 ### Variables and arithmetic
 
-```
+``` write
 set x to 10
 set y to 5
 set sum to add x and y
@@ -14,14 +14,14 @@ set powered to power x and 2
 
 ### Printing
 
-```
+``` write
 print sum
 print "Hello World"
 ```
 
 ### Conditionals
 
-```
+``` write
 if x is greater than y then
     print "x is greater"
 else if x is equal to y then
@@ -33,7 +33,7 @@ end if
 
 ### While loop
 
-```
+``` write
 while x is less than 10 do
     set x to add x and 1
     print x
@@ -42,7 +42,7 @@ end while
 
 ### For loop
 
-```
+``` write
 for i from 1 to 5 do
     print i
 end for
@@ -50,7 +50,7 @@ end for
 
 ### Logical expressions
 
-```
+``` write
 if !(x == 0 | y == 0) then
     print "none is zero"
 end if

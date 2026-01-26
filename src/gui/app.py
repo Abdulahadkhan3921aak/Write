@@ -26,6 +26,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Write IDE (PySide6)")
         self._editor_base_font_size = None
         self._cpp_visible = False
+        self._tab_dirty: dict[QtWidgets.QWidget, bool] = {}
+        self._lint_overlays: dict[
+            QtWidgets.QWidget, list[QtWidgets.QTextEdit.ExtraSelection]
+        ] = {}
+        self._diag_selection: dict[
+            QtWidgets.QWidget, QtWidgets.QTextEdit.ExtraSelection | None
+        ] = {}
+        self._symbols: dict[QtWidgets.QWidget, dict[str, set[str]]] = {}
         self.settings = QtCore.QSettings("WriteIDE", "Write")
         self.compiler_path = Path(self.settings.value("compiler_path", str(WRITEC)))
         self.compiler_extra_args = self.settings.value("compiler_extra_args", "")
@@ -33,9 +41,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace_root: Path | None = workspace
         self.proc: QtCore.QProcess | None = None
         self._tab_paths: dict[QtWidgets.QWidget, Path | None] = {}
+        self._lint_timer = QtCore.QTimer(self)
+        self._lint_timer.setSingleShot(True)
+        self._lint_timer.timeout.connect(self._run_lint_pass)
+        self._main_vertical_splitter: QtWidgets.QSplitter | None = None
+        self._main_horizontal_splitter: QtWidgets.QSplitter | None = None
         self.build_paths = BuildPaths()
         self._build_ui()
         self._setup_menu()
+        QtCore.QTimer.singleShot(0, self._set_default_layout_sizes)
         if self.workspace_root:
             self._set_workspace_root(self.workspace_root)
 
@@ -46,6 +60,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_tabs.setTabsClosable(True)
         self.editor_tabs.tabCloseRequested.connect(self._close_tab)
         self.editor_tabs.currentChanged.connect(self._on_tab_changed)
+        self.editor_tabs.setMinimumHeight(320)
 
         # start with no workspace and no documents; user opens or creates
         self._editor_base_font_size = mono_font.pointSize()
@@ -97,6 +112,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diagnostics_view.itemClicked.connect(self._jump_to_diagnostic)
         self.output_tabs.addTab(self.diagnostics_view, "Diagnostics")
 
+        self.lint_view = QtWidgets.QListWidget()
+        self.lint_view.setToolTip("Lightweight linting hints (fast, heuristic)")
+        self.output_tabs.addTab(self.lint_view, "Lint")
+
         self.fs_model = QtWidgets.QFileSystemModel()
         self.fs_model.setFilter(
             QtCore.QDir.AllDirs | QtCore.QDir.NoDotAndDotDot | QtCore.QDir.Files
@@ -137,8 +156,10 @@ class MainWindow(QtWidgets.QMainWindow):
         open_btn.clicked.connect(self.open_file)
         open_folder_btn = QtWidgets.QPushButton("Open Folder…")
         open_folder_btn.clicked.connect(self.open_folder)
-        save_btn = QtWidgets.QPushButton("Save As…")
+        save_btn = QtWidgets.QPushButton("Save")
         save_btn.clicked.connect(self.save_file)
+        save_as_btn = QtWidgets.QPushButton("Save As…")
+        save_as_btn.clicked.connect(self.save_file_as)
         transpile_btn = QtWidgets.QPushButton("Transpile")
         transpile_btn.clicked.connect(self.transpile_only)
         compile_btn = QtWidgets.QPushButton("Compile")
@@ -160,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons = QtWidgets.QHBoxLayout()
         buttons.addWidget(open_btn)
         buttons.addWidget(save_btn)
+        buttons.addWidget(save_as_btn)
         buttons.addWidget(open_folder_btn)
         buttons.addSpacing(8)
         buttons.addWidget(QtWidgets.QLabel("Sample:"))
@@ -181,29 +203,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._cpp_visible:
             self.code_splitter.setSizes([1, 0])
 
-        splitter = QtWidgets.QSplitter()
-        splitter.setOrientation(QtCore.Qt.Vertical)
-        splitter.addWidget(self.code_splitter)
-        splitter.addWidget(tabs_container)
-        splitter.setSizes([8, 2])
-        splitter.setStretchFactor(0, 5)
-        splitter.setStretchFactor(1, 1)
+        self._main_vertical_splitter = QtWidgets.QSplitter()
+        self._main_vertical_splitter.setOrientation(QtCore.Qt.Vertical)
+        self._main_vertical_splitter.addWidget(self.code_splitter)
+        self._main_vertical_splitter.addWidget(tabs_container)
+        self._main_vertical_splitter.setStretchFactor(0, 5)
+        self._main_vertical_splitter.setStretchFactor(1, 1)
+        self._main_vertical_splitter.setCollapsible(0, False)
+        tabs_container.setMinimumHeight(140)
 
-        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        main_splitter.addWidget(self.file_view)
-        main_splitter.addWidget(splitter)
-        main_splitter.setSizes([1, 4])
+        self._main_horizontal_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._main_horizontal_splitter.addWidget(self.file_view)
+        self._main_horizontal_splitter.addWidget(self._main_vertical_splitter)
+        self._main_horizontal_splitter.setSizes([1, 4])
+        self._main_horizontal_splitter.setCollapsible(1, False)
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.addLayout(buttons)
-        layout.addWidget(main_splitter)
+        layout.addWidget(self._main_horizontal_splitter)
         self.setCentralWidget(central)
 
     def _setup_menu(self):
         menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
         view_menu = menubar.addMenu("View")
         tools_menu = menubar.addMenu("Tools")
+
+        save_action = QtGui.QAction("Save", self)
+        save_action.setShortcut(QtGui.QKeySequence.Save)
+        save_action.triggered.connect(self.save_file)
+        save_as_action = QtGui.QAction("Save As…", self)
+        save_as_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
+        save_as_action.triggered.connect(self.save_file_as)
+
+        file_menu.addAction(save_action)
+        file_menu.addAction(save_as_action)
 
         inc_font = QtGui.QAction("Increase Editor Font", self)
         inc_font.triggered.connect(lambda: self._adjust_editor_font(1))
@@ -240,6 +275,13 @@ class MainWindow(QtWidgets.QMainWindow):
         editor.setFont(font)
         WriteHighlighter(editor.document())
         editor.setPlainText(text)
+        editor.document().setModified(False)
+        editor.textChanged.connect(lambda e=editor: self._on_editor_changed(e))
+        editor.cursorPositionChanged.connect(lambda e=editor: self._on_cursor_moved(e))
+        self._tab_dirty[editor] = False
+        self._lint_overlays[editor] = []
+        self._diag_selection[editor] = None
+        self._symbols[editor] = {"funcs": set(), "vars": set()}
         return editor
 
     def _open_text_in_tab(self, text: str, path: Path | None, label: str):
@@ -247,6 +289,8 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self.editor_tabs.addTab(editor, label)
         self.editor_tabs.setCurrentIndex(idx)
         self._tab_paths[editor] = path
+        self._tab_dirty[editor] = False
+        self._update_tab_label(editor)
         if path:
             self.editor_tabs.setTabToolTip(idx, str(path))
 
@@ -254,6 +298,8 @@ class MainWindow(QtWidgets.QMainWindow):
         editor = self._current_editor()
         if editor and not editor.toPlainText().strip():
             editor.setPlainText(text)
+            editor.document().setModified(False)
+            self._tab_dirty[editor] = False
             self._set_current_path(path)
             return
         self._open_text_in_tab(text, path, path.name)
@@ -271,19 +317,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not editor:
             return
         self._tab_paths[editor] = path
-        idx = self.editor_tabs.indexOf(editor)
-        if idx >= 0:
-            label = path.name if path else "Untitled"
-            self.editor_tabs.setTabText(idx, label)
-            if path:
+        self._update_tab_label(editor)
+        if path:
+            idx = self.editor_tabs.indexOf(editor)
+            if idx >= 0:
                 self.editor_tabs.setTabToolTip(idx, str(path))
 
     def _close_tab(self, index: int):
         widget = self.editor_tabs.widget(index)
-        if widget:
-            self.build_paths.cleanup_for_editor(id(widget))
-            self._tab_paths.pop(widget, None)
-            widget.deleteLater()
+        if not widget:
+            return
+        if not self._confirm_close_editor(widget):
+            return
+        self.build_paths.cleanup_for_editor(id(widget))
+        self._tab_paths.pop(widget, None)
+        self._tab_dirty.pop(widget, None)
+        self._lint_overlays.pop(widget, None)
+        self._diag_selection.pop(widget, None)
+        widget.deleteLater()
         self.editor_tabs.removeTab(index)
 
     def _on_tab_changed(self, _index: int):
@@ -337,20 +388,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not editor:
             self._warn("No document to save")
             return
-        current_path = self._current_path()
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Save Write file",
-            str(current_path.parent if current_path else PROJECT_ROOT),
-            "Write Files (*.write)",
-        )
-        if not path:
+        saved = self._save_editor(editor, force_dialog=False)
+        if saved:
+            p = self._current_path()
+            if p:
+                self._store_last_file(p)
+
+    def save_file_as(self):
+        editor = self._current_editor()
+        if not editor:
+            self._warn("No document to save")
             return
-        p = Path(path)
-        p.write_text(editor.toPlainText(), encoding="utf-8")
-        self._set_current_path(p)
-        self._log(f"Saved {p.name}")
-        self._store_last_file(p)
+        saved = self._save_editor(editor, force_dialog=True)
+        if saved:
+            p = self._current_path()
+            if p:
+                self._store_last_file(p)
 
     def load_sample(self, path: Path):
         text = Path(path).read_text(encoding="utf-8")
@@ -550,6 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for v in (self.warn_view, self.error_view, self.terminal_view):
             v.clear()
         self.diagnostics_view.clear()
+        self.lint_view.clear()
         self._clear_highlights()
         self.terminal_input.clear()
         self.cpp_view.clear()
@@ -758,12 +812,49 @@ class MainWindow(QtWidgets.QMainWindow):
         fmt.setBackground(QtGui.QColor("#ffebee"))
         selection.format = fmt
         selection.cursor = cursor
-        editor.setExtraSelections([selection])
+        self._diag_selection[editor] = selection
+        self._apply_all_selections(editor)
 
     def _clear_highlights(self):
         editor = self._current_editor()
         if editor:
-            editor.setExtraSelections([])
+            self._diag_selection[editor] = None
+            self._apply_all_selections(editor)
+
+    def _set_default_layout_sizes(self):
+        # Apply generous defaults so the editor area stays tall on startup.
+        if self._cpp_visible:
+            self.code_splitter.setSizes([3, 2])
+        else:
+            self.code_splitter.setSizes([1, 0])
+        if self._main_vertical_splitter:
+            self._main_vertical_splitter.setSizes([10, 3])
+            self._main_vertical_splitter.setStretchFactor(0, 10)
+            self._main_vertical_splitter.setStretchFactor(1, 3)
+            self._main_vertical_splitter.setCollapsible(0, False)
+        if self._main_horizontal_splitter:
+            self._main_horizontal_splitter.setSizes([1, 5])
+            self._main_horizontal_splitter.setCollapsible(1, False)
+
+    def _ensure_layout_sizes(self):
+        # Nudge splitter sizes after show; guard against the editor being squeezed.
+        self._set_default_layout_sizes()
+        if not self._main_vertical_splitter:
+            return
+        sizes = self._main_vertical_splitter.sizes()
+        if len(sizes) >= 2:
+            total = sum(sizes)
+            if total > 0 and sizes[0] < total * 0.6:
+                self._main_vertical_splitter.setSizes(
+                    [int(total * 0.75), int(total * 0.25)]
+                )
+
+    def _apply_all_selections(self, editor: QtWidgets.QPlainTextEdit):
+        selections = list(self._lint_overlays.get(editor, []))
+        diag = self._diag_selection.get(editor)
+        if diag:
+            selections.append(diag)
+        editor.setExtraSelections(selections)
 
     def _jump_to_diagnostic(self, item: QtWidgets.QListWidgetItem):
         data = item.data(QtCore.Qt.UserRole)
@@ -790,10 +881,228 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return hints
 
+    # --- lint helpers (lightweight, heuristic, fast) ---
+    def _on_editor_changed(self, editor: QtWidgets.QPlainTextEdit):
+        self._mark_dirty(editor, True)
+        self._schedule_lint(editor)
+
+    def _schedule_lint(self, editor: QtWidgets.QPlainTextEdit):
+        # Do not spam lint on huge buffers.
+        if len(editor.toPlainText()) > 8000:
+            self.lint_view.clear()
+            self.lint_view.addItem("Lint skipped: file too large for quick pass")
+            return
+        self._lint_timer.stop()
+        self._lint_timer.setProperty("editor", editor)
+        self._lint_timer.start(200)
+
+    def _run_lint_pass(self):
+        editor = self._lint_timer.property("editor")
+        if not isinstance(editor, QtWidgets.QPlainTextEdit):
+            return
+        text = editor.toPlainText()
+        hints = self._compute_lint_hints(text)
+        self._update_symbol_index(editor, text)
+        self.lint_view.clear()
+        if not hints:
+            self.lint_view.addItem("No lint hints")
+            self._lint_overlays[editor] = []
+            self._apply_all_selections(editor)
+            return
+        overlays = []
+        for line, hint in hints:
+            prefix = f"L{line}: " if line else ""
+            self.lint_view.addItem(prefix + hint)
+            if line:
+                cursor = editor.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.Start)
+                cursor.movePosition(QtGui.QTextCursor.Down, n=line - 1)
+                cursor.select(QtGui.QTextCursor.LineUnderCursor)
+                sel = QtWidgets.QTextEdit.ExtraSelection()
+                fmt = QtGui.QTextCharFormat()
+                fmt.setUnderlineStyle(QtGui.QTextCharFormat.DashUnderline)
+                fmt.setUnderlineColor(QtGui.QColor("#c77d00"))
+                fmt.setBackground(QtGui.QColor(255, 244, 229, 60))
+                sel.format = fmt
+                sel.cursor = cursor
+                overlays.append(sel)
+        self._lint_overlays[editor] = overlays
+        self._apply_all_selections(editor)
+
+    def _compute_lint_hints(self, text: str) -> list[tuple[int | None, str]]:
+        hints: list[tuple[int | None, str]] = []
+        lines = text.splitlines()
+        func_opens = [
+            i + 1 for i, ln in enumerate(lines) if re.search(r"\bfunc(tion)?\b", ln)
+        ]
+        func_closes = [
+            i + 1
+            for i, ln in enumerate(lines)
+            if "end_function" in ln or "end_func" in ln
+        ]
+        if len(func_opens) != len(func_closes):
+            hints.append(
+                (
+                    func_opens[0] if func_opens else None,
+                    "Function/end_function count is mismatched",
+                )
+            )
+
+        for i, ln in enumerate(lines):
+            if "arguments" in ln and ":" not in ln:
+                hints.append((i + 1, "Add ':' after arguments: (a:int, b:float)"))
+
+        for i, ln in enumerate(lines):
+            if "call" in ln and "arguments" not in ln:
+                hints.append((i + 1, "Call syntax: call name with arguments:(…)"))
+
+        for i, ln in enumerate(lines):
+            if ln.rstrip() != ln:
+                hints.append((i + 1, "Trailing whitespace"))
+
+        for i, ln in enumerate(lines):
+            if "list" in ln and "size" not in ln:
+                hints.append(
+                    (i + 1, "Lists usually need a size: list size 5 set my_list")
+                )
+
+        return hints
+
+    def _update_symbol_index(self, editor: QtWidgets.QPlainTextEdit, text: str):
+        lines = text.splitlines()
+        funcs: set[str] = set()
+        vars_: set[str] = set()
+        for ln in lines:
+            fn_match = re.search(r"\bfunc(?:tion)?\s+\"([^\"]+)\"", ln)
+            if fn_match:
+                funcs.add(fn_match.group(1))
+            for pat in [
+                r"\bmake\s+([A-Za-z_][\w]*)",
+                r"\bset\s+([A-Za-z_][\w]*)",
+                r"\binput\s+([A-Za-z_][\w]*)",
+            ]:
+                m = re.search(pat, ln)
+                if m:
+                    vars_.add(m.group(1))
+        self._symbols[editor] = {"funcs": funcs, "vars": vars_}
+
+    def _on_cursor_moved(self, editor: QtWidgets.QPlainTextEdit):
+        cursor = editor.textCursor()
+        block_text = cursor.block().text()
+        prefix = block_text[: cursor.positionInBlock()]
+        funcs = list(self._symbols.get(editor, {}).get("funcs", []))
+        vars_ = list(self._symbols.get(editor, {}).get("vars", []))
+        if not funcs and not vars_:
+            return
+
+        def _popup(lines: list[str]):
+            if not lines:
+                return
+            rect = editor.cursorRect(cursor)
+            global_pos = editor.viewport().mapToGlobal(rect.bottomRight())
+            QtWidgets.QToolTip.showText(global_pos, "\n".join(lines), editor)
+
+        stripped = prefix.rstrip()
+        if stripped.endswith("call"):
+            items = ["Functions:"] + sorted(funcs)
+            _popup(items)
+            return
+        if "call " in stripped:
+            word = stripped.split("call", 1)[1].strip().strip('"')
+            matches = [f for f in funcs if word.lower() in f.lower()]
+            if matches:
+                items = ["Call candidates:"] + sorted(matches)
+                _popup(items)
+                return
+        if any(stripped.endswith(tok) for tok in ["set", "make", "input"]):
+            items = ["Variables:"] + sorted(vars_)
+            _popup(items)
+
     def closeEvent(self, event: QtGui.QCloseEvent):
+        if not self._confirm_close_all_tabs():
+            event.ignore()
+            return
         self._stop_process()
         self.build_paths.cleanup_all()
         super().closeEvent(event)
+
+    def showEvent(self, event: QtGui.QShowEvent):
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._ensure_layout_sizes)
+
+    # --- dirty-tracking and save helpers ---
+    def _mark_dirty(self, editor: QtWidgets.QPlainTextEdit, dirty: bool):
+        self._tab_dirty[editor] = dirty
+        editor.document().setModified(dirty)
+        self._update_tab_label(editor)
+
+    def _update_tab_label(self, editor: QtWidgets.QWidget):
+        idx = self.editor_tabs.indexOf(editor)
+        if idx < 0:
+            return
+        path = self._tab_paths.get(editor)
+        base = path.name if path else "Untitled"
+        dirty = self._tab_dirty.get(editor, False)
+        label = f"*{base}" if dirty else base
+        self.editor_tabs.setTabText(idx, label)
+
+    def _save_editor(
+        self, editor: QtWidgets.QPlainTextEdit, *, force_dialog: bool = False
+    ) -> bool:
+        if not editor:
+            return False
+        current_path = self._tab_paths.get(editor)
+        initial_dir = (
+            current_path.parent if current_path else self.workspace_root or PROJECT_ROOT
+        )
+        path: Path | None = None
+        if force_dialog or not current_path:
+            selected, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save Write file",
+                str(initial_dir),
+                "Write Files (*.write)",
+            )
+            if not selected:
+                return False
+            path = Path(selected)
+        else:
+            path = current_path
+        if not path:
+            return False
+        path.write_text(editor.toPlainText(), encoding="utf-8")
+        self._tab_paths[editor] = path
+        self._mark_dirty(editor, False)
+        self._log(f"Saved {path.name}")
+        return True
+
+    def _confirm_close_editor(self, editor: QtWidgets.QPlainTextEdit) -> bool:
+        if not self._tab_dirty.get(editor):
+            return True
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Unsaved changes")
+        msg.setText("Save changes before closing?")
+        msg.setStandardButtons(
+            QtWidgets.QMessageBox.Save
+            | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel
+        )
+        msg.setDefaultButton(QtWidgets.QMessageBox.Save)
+        choice = msg.exec()
+        if choice == QtWidgets.QMessageBox.Cancel:
+            return False
+        if choice == QtWidgets.QMessageBox.Save:
+            return self._save_editor(editor)
+        return True
+
+    def _confirm_close_all_tabs(self) -> bool:
+        # Iterate in reverse so UI closes from right-most if confirmed.
+        for idx in reversed(range(self.editor_tabs.count())):
+            editor = self.editor_tabs.widget(idx)
+            if isinstance(editor, QtWidgets.QPlainTextEdit):
+                if not self._confirm_close_editor(editor):
+                    return False
+        return True
 
 
 def main():
