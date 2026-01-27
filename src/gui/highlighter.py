@@ -15,8 +15,10 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
         kw_format.setFontWeight(QtGui.QFont.Bold)
         keywords = [
             "set",
+            "make",
             "to",
             "print",
+            "input",
             "if",
             "else",
             "end",
@@ -25,6 +27,7 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
             "do",
             "for",
             "from",
+            "as",
             "and",
             "or",
             "not",
@@ -39,6 +42,10 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
             "multiply",
             "divide",
             "power",
+            "int",
+            "float",
+            "string",
+            "bool",
             "function",
             "func",
             "list",
@@ -49,6 +56,8 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
             "arg",
             "args",
             "return",
+            "of",
+            "size",
             "with",
             "call",
         ]
