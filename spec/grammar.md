@@ -1,86 +1,103 @@
-# Write Grammar (LL-friendly)
+# Write Grammar (parser-aligned, LL-friendly)
 
-Goal: deterministic, beginner-readable grammar suitable for an LL parser. This captures the English-like syntax, precedence/associativity, and key FIRST/FOLLOW considerations.
+Deterministic, readable grammar that matches the current recursive-descent parser in
+`src/compiler/parser.py`. Uses explicit block terminators and English-like phrases.
 
-## Tokens (high-level)
+## Tokens (high level)
 
-- Keywords: `set`, `to`, `print`, `if`, `else`, `end`, `then`, `while`, `do`, `for`, `from`, `and`, `or`, `not`, `is`, `greater`, `less`, `equal`, `than`
-- Symbols: `+ - * / ( ) ! & | == != > < >= <=`
-- Literals: NUMBER (int or float), STRING
-- Identifiers: IDENT
+- Keywords: `set`, `make`, `input`, `as`, `of`, `size`, `to`, `print`, `return`,
+    `if`, `else`, `then`, `while`, `do`, `for`, `from`, `and`, `or`, `not`, `is`,
+    `greater`, `less`, `equal`, `than`, `add`, `subtract`, `sub`, `multiply`,
+    `divide`, `power`, `int`, `float`, `string`, `bool`, `list`, `array`,
+    `function`, `func`, `end_function`, `end_func`, `arguments`, `aguments`,
+    `with`, `call`.
+- Symbols: `+ - * / ^ ( ) [ ] , : ! & | == != > < >= <= =`.
+- Literals: NUMBER (int/float), STRING.
+- Identifiers: IDENT.
+- EOF sentinel.
 
-## Operator precedence (high to low)
+## Operator precedence (high → low)
 
 1. Parentheses `( )`
-2. Unary: `!` / `not`
-3. Power form: `power A and B` (right-associative)
-4. Multiplicative: `* /` / `multiply` `divide`
-5. Additive: `+ -` / `add` `subtract`
-6. Comparisons: `== != > < >= <=` and English forms
-7. Logical AND: `and` `&`
-8. Logical OR: `or` `|`
+2. Unary `+ -` and logical `!` / `not`
+3. Power: `a ^ b` or phrase `power a and b` (right-associative)
+4. Multiplicative: `* /` or phrases `multiply/divide ... and ...`
+5. Additive: `+ -` or phrases `add/subtract ... and ...`
+6. Comparisons: `== != > < >= <=` and English forms (`is greater than`, etc.)
+7. Logical AND: `and` / `&`
+8. Logical OR: `or` / `|`
 
-Associativity: binary operators are left-associative except power (right-associative by design). Logical ops are left-associative.
+All binary operators are left-associative except power (right-associative).
 
-## Grammar (EBNF, LL-structured)
+## Grammar (EBNF)
 
-## Top-level
+### Top-level
 
-program        ::= stmt_list EOF
-stmt_list      ::= (function_def | stmt) stmt_list | ε
+program        ::= (function_def | stmt)* EOF
 
-function_def   ::= ("function" | "func") func_name ("arguments")? ":"? "(" param_list? ")" stmt_list function_end
+function_def   ::= ("function" | "func") func_name ("arguments" | "aguments")? ":"? "(" param_list? ")" stmt* function_end
 function_end   ::= "end_function" | "end_func" | "end" ("function" | "func")
 func_name      ::= STRING | IDENT
 
 param_list     ::= param ("," param)*
-param          ::= IDENT (":" type)? ("=" expr)?
+param          ::= IDENT (":" type_name)? ("=" expr)?
+type_name      ::= "int" | "float" | "string" | "bool" | "list" | "array"
+
+### Statements
 
 stmt           ::= assignment
-    | print_stmt
-    | if_stmt
-    | while_stmt
-    | for_stmt
-    | call_stmt
-    | return_stmt
-    | add_stmt
-    | sub_stmt
-    | declaration
+                                | declaration
+                                | input_stmt
+                                | print_stmt
+                                | call_stmt
+                                | return_stmt
+                                | if_stmt
+                                | while_stmt
+                                | for_stmt
+                                | add_stmt
+                                | sub_stmt
 
-call_stmt      ::= "call" func_name "with" "arguments" ":"? "(" arg_list? ")"
-arg_list       ::= arg ("," arg)*
-arg            ::= IDENT "=" expr | expr
+declaration    ::= "make" IDENT ("as" type_name ("of" "size" expr)? )?
 
-return_stmt    ::= "return" return_values?
-return_values  ::= expr ("," expr)*
+assignment     ::= "set" IDENT (index_suffix)? (":" type_name)? "to" assignment_rhs
+index_suffix   ::= "[" expr "]"
+assignment_rhs ::= expr | add_phrase | sub_phrase
 
-assignment     ::= "set" IDENT (":" type)? "to" (expr | add_phrase | sub_phrase)
-declaration    ::= "make" IDENT ("as" type)?
+# convenience in-place updates
 
 add_stmt       ::= add_phrase
 sub_stmt       ::= sub_phrase
-
 add_phrase     ::= "add" expr "to" IDENT
 sub_phrase     ::= ("sub" | "subtract") expr "from" IDENT
 
-type           ::= "int" | "float" | "string" | "bool" | "list" | "array"
+# input and return
 
-print_stmt     ::= "print" (STRING | expr)
+input_stmt     ::= "input" STRING? IDENT ("as" type_name)?
+return_stmt    ::= "return" return_values?
+return_values  ::= expr ("," expr | expr)*
 
-if_stmt        ::= "if" cond "then" stmt_list elseif_tail else_tail "end" "if"
+# alias: "set return to ..."
 
-elseif_tail    ::= "else" "if" cond "then" stmt_list elseif_tail | ε
+assignment     ::= "set" "return" "to" return_values
 
-else_tail      ::= "else" stmt_list | ε
+print_stmt     ::= "print" print_values
+print_values   ::= expr ("," expr | expr)*
 
-while_stmt     ::= "while" cond "do" stmt_list "end" "while"
+call_stmt      ::= "call" func_name "with" ("arguments" | "aguments") ":"? "(" arg_list? ")"
+arg_list       ::= arg ("," arg)*
+arg            ::= IDENT "=" expr | expr
 
-for_stmt       ::= "for" IDENT "from" expr "to" expr "do" stmt_list "end" "for"
+if_stmt        ::= "if" cond "then" stmt*elif_tail else_tail "end" "if"
+elif_tail      ::= ("else" "if" cond "then" stmt*)*
+else_tail      ::= ("else" stmt*)?
 
-## Conditions factored for LL (no left recursion)
+while_stmt     ::= "while" cond "do" stmt* "end" "while"
+
+for_stmt       ::= "for" IDENT "from" expr "to" expr "do" stmt* "end" "for"
+
+### Conditions (LL factored)
 
 cond           ::= cond_or
-
 cond_or        ::= cond_and (log_or cond_and)*
 cond_and       ::= cond_not (log_and cond_not)*
 cond_not       ::= ("!" | "not") cond_not | cond_cmp
@@ -90,48 +107,39 @@ log_or         ::= "or" | "|"
 log_and        ::= "and" | "&"
 
 comp_op        ::= "==" | "!=" | ">" | "<" | ">=" | "<="
-    | "is" "equal" "to"
-    | "is" "not" "equal" "to"
-    | "is" "greater" "than"
-    | "is" "less" "than"
-    | "is" "greater" "or" "equal" "to"
-    | "is" "less" "or" "equal" "to"
+                                | "is" "equal" "to"
+                                | "is" "not" "equal" "to"
+                                | "is" "greater" "than"
+                                | "is" "less" "than"
+                                | "is" "greater" "than" "or" "equal" "to"
+                                | "is" "less" "than" "or" "equal" "to"
 
-## Expressions factored for precedence
+### Expressions (precedence-factored)
 
 expr           ::= add_expr
-
-add_expr       ::= mul_expr (("+" | "-" | "add" | "subtract") mul_expr)*
-mul_expr       ::= power_expr (("*" | "/" | "multiply" | "divide") power_expr)*
-
-## Right-associative power
-
-power_expr     ::= unary_expr ("power" unary_expr "and" power_expr)?
-
+add_expr       ::= mul_expr (("+" | "-") mul_expr)*
+mul_expr       ::= power_expr (("*" | "/") power_expr)*
+power_expr     ::= unary_expr ("^" unary_expr | "power" unary_expr "and" power_expr)?
 unary_expr     ::= ("+" | "-") unary_expr | primary
 
 primary        ::= NUMBER
-    | IDENT
-    | STRING
-    | "(" expr ")"
+                                | STRING
+                                | IDENT index_suffix?
+                                | "(" expr ")"
+                                | phrase_binary
 
-## Optional tightening (implementation choices)
+phrase_binary  ::= ("add" | "subtract" | "multiply" | "divide") unary_expr "and" unary_expr
+                                 | "power" unary_expr "and" unary_expr
 
-- If you want to disallow string comparisons, gate `STRING` out of `primary` and allow it only in `print_stmt`.
-- To avoid ambiguity between `else if` and `elseif`, keep it lexed as two keywords and parsed via `elseif_tail` as above.
-- If you prefer iterative stmt_list, you can parse statements in a loop until you see a block terminator token (`end`, `else`, `EOF`).
+### Notes
 
-## FIRST/FOLLOW notes (high level)
-
-- `stmt` FIRST: {`set`, `print`, `if`, `while`, `for`}
-- `cond` FIRST: inherits from `cond_or` → from `cond_not` → from `!`, `not`, `(`, NUMBER, IDENT, STRING
-- `expr` FIRST: `+ - ( NUMBER IDENT STRING`
-- `stmt_list` FIRST: same as `stmt`; FOLLOW often includes block terminators (`end`, `else`, `else if`, `end while`, `end for`, EOF)
-- Factoring `cond` into `or/and/not/cmp` removes left recursion and keeps disjoint FIRST sets for choice points.
-
-## Notes
-
-- Comparison phrases are multi-token; the lexer should emit symbolic tokens for `== != > < >= <=` and treat English forms as keyword sequences consumed by `comp_op`.
-- Power is right-associative to align with math expectations.
-- Blocks end explicitly with `end if`, `end while`, `end for` to avoid dangling-else ambiguity.
-- Extend grammar here as features grow (e.g., functions) while preserving LL shape.
+- Comparison phrases are multi-token sequences; the lexer emits individual keyword
+    tokens, and the parser recognizes the sequences.
+- `print` and `return` accept multiple expressions separated by commas or simply
+    juxtaposed expressions on the same line (parser keeps consuming expression starts).
+- Lists/arrays may declare a size with `make my_list as list of size 10` and are
+    indexed with `name[expr]` in both expressions and assignments.
+- Functions accept string or identifier names, support default parameter values,
+    and allow both positional and named call arguments.
+- Blocks end explicitly with `end if`, `end while`, `end for`, `end function` to
+    avoid dangling-else ambiguity.
