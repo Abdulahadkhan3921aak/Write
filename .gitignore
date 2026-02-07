@@ -8,6 +8,7 @@ __pycache__/
 # Ignore virtual environment folders
 write/
 .venv/
+venv
 
 # Ignore IDE specific files
 .vscode/
