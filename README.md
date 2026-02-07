@@ -24,36 +24,38 @@ English-like teaching language that transpiles to C++ with a beginner-friendly P
 
 1) Install deps (recommend venv):
 
-```
+```bash
 python -m pip install -r requirements.txt
 ```
 
 1) CLI transpile/compile/run:
 
-```
+```bash
 python -m compiler.writec spec/examples/hello.write --out out.cpp
 python -m compiler.writec spec/examples/hello.write --out out.cpp --compile --run
 ```
 
 1) GUI:
 
-```
+```bash
+pip install -e .
+
 python -m gui.app
 ```
 
-- Ctrl+S / Ctrl+Shift+S to save; closing dirty tabs prompts Save / Don’t Save / Cancel.
+- Ctrl+S / Ctrl+Shift+S to save; closing dirty tabs prompts Save / Don't Save / Cancel.
 - Lint shows dashed underlines and tooltips with nearby function/variable suggestions (e.g., after typing `call`).
 
 1) Tests:
 
-```
+```bash
 python -m pytest
 ```
 
 ## Roadmap
 
 - Richer autocomplete (live symbol list, snippets) and themeable lint colors.
-- “Save All”, recent files, and workspace/tab restore.
+- "Save All", recent files, and workspace/tab restore.
 - Background parse-based linting for deeper checks and hover docs.
 - Packaged GUI (PyInstaller) and bundled compiler toolchain on Windows.
 
