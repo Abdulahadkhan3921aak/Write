@@ -17,7 +17,7 @@ from .keyword_help import KeywordDatabase
 from .theme import ThemeManager, ThemeMode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WRITEC = PROJECT_ROOT / "write" / "Scripts" / "python.exe"
+WRITEC = Path(sys.executable)
 WRITEC_MODULE = "-m"
 WRITEC_ENTRY = "compiler.writec"
 SAMPLES_DIR = PROJECT_ROOT / "spec" / "examples"
